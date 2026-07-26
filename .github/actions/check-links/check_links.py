@@ -25,9 +25,19 @@ def changed_files() -> list[str] | None:
     subprocess.check_call(  # noqa: S603
         ["git", "fetch", "--depth=1", "origin", base_sha],  # noqa: S607
         stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+    try:
+        merge_base = subprocess.check_output(  # noqa: S603
+            ["git", "merge-base", base_sha, "HEAD"],  # noqa: S607
+            text=True,
+        ).strip()
+        diff_base = merge_base or base_sha
+    except subprocess.CalledProcessError:
+        log("Could not determine merge-base; falling back to base SHA diff.")
+        diff_base = base_sha
     output = subprocess.check_output(  # noqa: S603
-        ["git", "diff", "--name-only", "--diff-filter=ACMRT", base_sha, "HEAD"],  # noqa: S607
+        ["git", "diff", "--name-only", "--diff-filter=ACMRT", diff_base, "HEAD"],  # noqa: S607
         text=True,
     )
     return output.splitlines()
