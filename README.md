@@ -420,6 +420,155 @@ jobs:
           path: playwright-report/report.html
 ```
 
+## UI Test Report Comment
+
+Use this action from a PR comment workflow to add or update a badge linking to an inlined UI test
+report that opens directly in the browser. If a Binder preview comment exists, the badge is added
+to that comment; otherwise the action creates a standalone report comment.
+
+The line it posts reads like this when every test passed:
+
+> View the UI test report in the browser: ![UI tests report](https://img.shields.io/badge/UI_tests-All_passing-success "All UI tests passed")
+
+and like this when some failed, where the badge links into the report already filtered to the
+failing tests:
+
+> View the UI test report in the browser: ![UI tests report](https://img.shields.io/badge/UI_tests-2_failing-red "2 failing UI tests")
+
+It expects a completed UI test workflow run to upload a `ui-test-report-comment-data` artifact
+containing `pr-comment-data.json`:
+
+```json
+{
+  "prNumber": 123,
+  "reportUrl": "https://github.com/OWNER/REPO/actions/runs/RUN_ID/artifacts/ARTIFACT_ID",
+  "failing": 0,
+  "flaky": 0
+}
+```
+
+If `failing` or `flaky` is missing or not a non-negative integer, the badge shows an unknown status.
+
+The PR comment workflow runs later with `workflow_run` and passes the completed UI test run id to
+this action.
+
+For a pull request from a fork, the artifact is written by code the fork controls, so the action
+treats its contents as untrusted. It only comments when the run the artifact came from is the
+current head commit of the pull request it names, and it only accepts a report URL under that same
+run's artifact path, which is where `upload-artifact` puts them.
+
+The action only ever edits comments written by a bot.
+
+The line the badge sits on starts with `View the UI test report in the browser: `, and that prefix
+is also how the action finds a line it posted before so it can update it in place.
+
+Example caller workflow:
+
+```yaml
+name: Update PR comment with UI test report
+
+on: # zizmor: ignore[dangerous-triggers] required to post from workflow_run artifact to PR comment
+  workflow_run:
+    workflows: ["UI Tests"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  update-preview-comment:
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: jupyterlab/maintainer-tools/.github/actions/ui-test-report-comment@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_id: ${{ github.event.workflow_run.id }}
+```
+
+The name in `workflows` must match the `name` of the UI test workflow exactly, otherwise the
+`workflow_run` trigger never fires. The comment workflow runs whatever the UI tests concluded, so
+that a run with failing tests reports its failures. A run which was
+cancelled, or which died before it uploaded the artifact, has nothing to report and the comment
+workflow fails on the missing artifact.
+
+If the JSON file in the artifact uses a different name, pass `comment_data_file`.
+
+Matching UI test workflow, producing the report and the comment data:
+
+```yaml
+name: UI Tests
+
+on:
+  pull_request:
+
+jobs:
+  ui-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jupyterlab/maintainer-tools/.github/actions/base-setup@v1
+
+      - name: Run Playwright tests
+        run: |
+          npm ci
+          npx playwright test --reporter=html,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report.json
+
+      - name: Inline report assets
+        if: ${{ !cancelled() }}
+        uses: jupyterlab/maintainer-tools/.github/actions/inline-playwright-report@v1
+        with:
+          path: playwright-report
+          output: playwright-report/report.html
+
+      - name: Upload inlined report
+        id: upload-report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: playwright-report-inlined
+          path: playwright-report/report.html
+
+      - name: Save PR comment data
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v8
+        env:
+          REPORT_URL: ${{ steps.upload-report.outputs.artifact-url }}
+        with:
+          script: |
+            const fs = require('fs');
+            let stats = {};
+            try {
+              stats = JSON.parse(fs.readFileSync('playwright-report.json', 'utf8')).stats;
+            } catch {
+              console.warn('No Playwright JSON report; the badge will show an unknown status.');
+            }
+            fs.writeFileSync('pr-comment-data.json', JSON.stringify({
+              prNumber: context.payload.pull_request.number,
+              reportUrl: process.env.REPORT_URL,
+              failing: stats.unexpected,
+              flaky: stats.flaky,
+            }));
+
+      - name: Upload PR comment data
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-test-report-comment-data
+          path: pr-comment-data.json
+          retention-days: 1
+```
+
+The `id` on the upload step is what makes `steps.upload-report.outputs.artifact-url` resolve. The
+counts come from the `stats` object
+of the Playwright JSON reporter, where `unexpected` is the number of failing tests. Failing tests
+fail the job, and every step after them is guarded with `!cancelled()` so that the report and the
+comment data are still produced and the badge reports the failures.
+
 ## Update snapshots
 
 You can use _update snapshots_ action to commit on a branch
